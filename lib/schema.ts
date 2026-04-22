@@ -13,16 +13,20 @@ export const FindingSchema = z.object({
 
 export const OverallRiskSchema = z.enum(["high", "medium", "low"]);
 
-// What the LLM is asked to return (pdf_text and doc_length_chars are
-// injected server-side; the model never sees those fields).
+// What the LLM is asked to return through tool_use: a flat findings list.
+// pdf_text and doc_length_chars are injected server-side; the model never
+// sees those fields, and the server re-buckets findings by category
+// before returning AnalysisSchema to the client.
+export const LlmFindingSchema = FindingSchema.extend({
+  category: z.enum(["red", "yellow", "green"]),
+});
+
 export const LlmOutputSchema = z.object({
   meta: z.object({
     overall_risk: OverallRiskSchema,
     summary: z.string(),
   }),
-  red: z.array(FindingSchema),
-  yellow: z.array(FindingSchema),
-  green: z.array(FindingSchema),
+  findings: z.array(LlmFindingSchema),
 });
 
 // Final shape returned to the client.

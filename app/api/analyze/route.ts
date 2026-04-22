@@ -2,21 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 
 import {
-  callClaude,
-  stripMarkdownFences,
+  callClaudeTool,
   type ChatMessage,
 } from "@/lib/anthropic";
-import {
-  extractPdfText,
-  MAX_TEXT_CHARS,
-  MIN_TEXT_CHARS,
-} from "@/lib/pdf";
-import {
-  RETRY_REMINDER,
-  SYSTEM_PROMPT,
-  buildUserPrompt,
-} from "@/lib/prompt";
-import { LlmOutputSchema } from "@/lib/schema";
+import { extractPdfText, MIN_TEXT_CHARS } from "@/lib/pdf";
+import { SYSTEM_PROMPT, buildUserPrompt } from "@/lib/prompt";
+import { LlmOutputSchema, type Finding } from "@/lib/schema";
 
 export const runtime = "nodejs";
 export const maxDuration = 60; // §11 Anthropic timeout budget.
@@ -74,39 +65,46 @@ export async function POST(req: NextRequest) {
   const messages: ChatMessage[] = [{ role: "user", content: userPrompt }];
   const deadline = Date.now() + LLM_BUDGET_MS;
 
-  let firstResp: string;
+  let raw: unknown;
   try {
-    firstResp = await withTimeout(
-      callClaude(SYSTEM_PROMPT, messages),
+    raw = await withTimeout(
+      callClaudeTool(SYSTEM_PROMPT, messages),
       Math.max(MIN_CALL_BUDGET_MS, deadline - Date.now()),
     );
   } catch (err) {
     return handleLlmError(err);
   }
 
-  let parsed = LlmOutputSchema.safeParse(safeJsonParse(stripMarkdownFences(firstResp)));
+  let parsed = LlmOutputSchema.safeParse(coerceToolInput(raw));
 
   if (!parsed.success) {
     const remaining = deadline - Date.now();
     if (remaining < MIN_CALL_BUDGET_MS) {
       return json(500, "We couldn't generate a clean report. Please retry.");
     }
-    // One retry with a stricter reminder per §10.
-    messages.push({ role: "assistant", content: firstResp });
-    messages.push({ role: "user", content: RETRY_REMINDER });
-    let retryResp: string;
+    // With tool_use the schema is enforced by the API itself, so a zod
+    // failure means Claude produced something structurally odd (e.g.
+    // missing a required field). One retry, same call shape.
     try {
-      retryResp = await withTimeout(
-        callClaude(SYSTEM_PROMPT, messages),
+      raw = await withTimeout(
+        callClaudeTool(SYSTEM_PROMPT, messages),
         remaining,
       );
     } catch (err) {
       return handleLlmError(err);
     }
-    parsed = LlmOutputSchema.safeParse(safeJsonParse(stripMarkdownFences(retryResp)));
+    parsed = LlmOutputSchema.safeParse(coerceToolInput(raw));
     if (!parsed.success) {
       return json(500, "We couldn't generate a clean report. Please retry.");
     }
+  }
+
+  const red: Finding[] = [];
+  const yellow: Finding[] = [];
+  const green: Finding[] = [];
+  for (const f of parsed.data.findings) {
+    const { category, ...rest } = f;
+    (category === "red" ? red : category === "yellow" ? yellow : green).push(rest);
   }
 
   const analysis = {
@@ -115,9 +113,9 @@ export async function POST(req: NextRequest) {
       doc_length_chars: extracted.text.length,
       ...(extracted.truncated ? { truncated: true as const } : {}),
     },
-    red: parsed.data.red,
-    yellow: parsed.data.yellow,
-    green: parsed.data.green,
+    red,
+    yellow,
+    green,
     pdf_text: extracted.text,
   };
 
@@ -130,12 +128,59 @@ function json(status: number, error: string) {
   return NextResponse.json({ error }, { status });
 }
 
-function safeJsonParse(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
+// Claude's tool_use sometimes serializes a long array as a JSON-encoded
+// string instead of a real array (observed on 20-page leases: `findings`
+// came back as a 7800-char string starting with `[`). If so, parse it —
+// and if Claude truncated the JSON mid-object, salvage complete items.
+function coerceToolInput(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object") return raw;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.findings === "string") {
+    const s = r.findings;
+    try {
+      const asArray = JSON.parse(s);
+      if (Array.isArray(asArray)) r.findings = asArray;
+    } catch {
+      // Claude's serialized string sometimes contains an unescaped `"`
+      // from a quoted lease clause (e.g. `¼"`). Salvage whatever complete
+      // objects we can before the break.
+      const salvaged = salvageArrayPrefix(s);
+      if (salvaged.length > 0) r.findings = salvaged;
+    }
   }
+  return r;
+}
+
+// When Claude streams a serialized array and hits its max_tokens ceiling,
+// the trailing item is incomplete. Recover the complete objects up to the
+// break point by scanning braces inside a bracketed array literal.
+function salvageArrayPrefix(s: string): unknown[] {
+  const trimmed = s.trim();
+  if (!trimmed.startsWith("[")) return [];
+  const out: unknown[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = 1; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (esc) { esc = false; continue; }
+    if (inStr) {
+      if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === "{") { if (depth === 0) start = i; depth++; }
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        try { out.push(JSON.parse(trimmed.slice(start, i + 1))); } catch { /* skip */ }
+        start = -1;
+      }
+    }
+  }
+  return out;
 }
 
 class TimeoutError extends Error {

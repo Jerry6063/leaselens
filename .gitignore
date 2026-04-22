@@ -14,7 +14,8 @@ dist/
 .vercel
 next-env.d.ts
 
-tmp-*.json
+tmp-*
+
 
 .claude/settings.local.json
 

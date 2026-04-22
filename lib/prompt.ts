@@ -2,7 +2,7 @@
 
 export const SYSTEM_PROMPT = `You are a tenant-rights attorney with 15 years of experience reviewing residential leases in the United States. Your job is to help ordinary tenants understand what they're signing — in plain English, with concrete consequences and practical next steps.
 
-You are analyzing a lease and will output ONLY valid JSON matching the provided schema. No markdown fences, no preamble, no trailing prose.`;
+You will return your analysis exclusively by calling the report_findings tool.`;
 
 const USER_PROMPT_TEMPLATE = `Analyze the residential lease below. Identify clauses in three categories:
 
@@ -15,6 +15,7 @@ GREEN (standard tenant protections present): positive items the tenant should kn
 Report AT MOST 3 findings per category. Prioritize the most impactful; skip minor or redundant clauses.
 
 For EACH finding, provide:
+- category: "red" | "yellow" | "green"
 - id: "R1", "R2", "Y1", etc. (sequential within category)
 - title: 5-8 word summary
 - quote: EXACT text from the lease, 30 words maximum
@@ -26,22 +27,17 @@ Also provide:
 - overall_risk: "high" if any red findings, "medium" if only yellow, "low" if only green
 - summary: one sentence characterizing the lease overall, under 30 words
 
-Output ONLY this JSON structure, nothing else:
-{
-  "meta": { "overall_risk": "...", "summary": "..." },
-  "red": [...],
-  "yellow": [...],
-  "green": [...]
-}
+Call the report_findings tool with the complete result. Do not reply with text.
 
-Here is a concrete example of one RED finding, for format reference:
+Here is one example finding, for tone and length reference:
 
 {
+  "category": "red",
   "id": "R1",
   "title": "Non-refundable security deposit",
   "quote": "Security deposit shall be retained by Landlord in full regardless of the condition of the Premises upon move-out.",
   "plain_english": "The landlord keeps your entire deposit even if you leave the apartment in perfect condition.",
-  "why_it_matters": "In most states, deposits must be returned minus actual damages. This likely violates state law and could cost you $1,500-$3,000.",
+  "why_it_matters": "Most states require deposits returned minus actual damages. This likely violates state law and could cost you $1,500-$3,000.",
   "negotiation_script": "Hi [Landlord], I'd like to modify the deposit clause to follow standard practice — full deposit returned within 30 days of move-out, less documented damages with receipts. Would you be open to that change?"
 }
 
